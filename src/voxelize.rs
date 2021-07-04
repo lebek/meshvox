@@ -1,7 +1,7 @@
 use super::sat::triangle_aabb_intersects;
 use super::vector::Vector3;
 use num_traits::Float;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque, HashMap};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Triangle<T: Copy> {
@@ -171,78 +171,62 @@ impl<T: Float> Voxels<T> {
     }
     /// Fills the interior with voxels
     pub fn fill(&mut self) {
+        // "One component at a time" algorithm from 
+        // https://en.wikipedia.org/wiki/Connected-component_labeling
+        let mut q : VecDeque<[i32; 3]> = VecDeque::new();
+        let mut labels : HashMap<[i32; 3], i32> = HashMap::new();
+
         let (min, max) = self.min_max();
 
-        let mut inside_along_z = HashSet::new();
-        for x in min[0]..(max[0] + 1) {
-            for y in min[1]..(max[1] + 1) {
-                let mut inside = true;
-                let mut i = 0;
-                let mut z_pre = 0;
-                for z in min[2]..(max[2] + 1) {
-                    if let Some(pos) = self.grid_positions.get(&[x, y, z]) {
-                        if i != 0 && pos[2] - z_pre > 1 {
-                            if inside {
-                                for p in (z_pre + 1)..pos[2] {
-                                    inside_along_z.insert([x, y, p]);
+        let mut current_label : i32 = 1;
+        for x in min[0]..=max[0] {
+            for y in min[1]..=max[1] {
+                for z in min[2]..=max[2] {
+                    // foreground = empty, background = filled
+                    let p = [x,y,z];
+                    let is_empty = !self.grid_positions.contains(&p);
+                    let is_labelled = labels.contains_key(&p);
+                    if is_empty && !is_labelled {
+                        labels.insert(p, current_label);
+                        q.push_front(p);
+
+                        while !q.is_empty() {
+                            if let Some(p2) = q.pop_back() {
+                                let neighbours = [
+                                    [p2[0]+1, p2[1], p2[2]],
+                                    [p2[0]-1, p2[1], p2[2]],
+                                    [p2[0], p2[1]+1, p2[2]],
+                                    [p2[0], p2[1]-1, p2[2]],
+                                    [p2[0], p2[1], p2[2]+1],
+                                    [p2[0], p2[1], p2[2]-1],
+                                ];
+
+                                for n in neighbours {
+                                    // First check neighbour is in bounds
+                                    if n[0] < min[0] || n[1] < min[1] || n[2] < min[2] || 
+                                        n[0] > max[0] || n[1] > max[1] || n[2] > max[2] {
+                                            continue;
+                                        }
+
+                                    let is_empty = !self.grid_positions.contains(&n);
+                                    let is_labelled = labels.contains_key(&n);
+
+                                    if is_empty && !is_labelled {
+                                        labels.insert(n, current_label);
+                                        q.push_front(n);
+                                    }
                                 }
                             }
-                            inside = !inside;
                         }
-                        i += 1;
-                        z_pre = pos[2];
+                        current_label += 1;
                     }
                 }
             }
         }
-        let mut inside_along_x = HashSet::new();
-        for y in min[1]..(max[1] + 1) {
-            for z in min[2]..(max[2] + 1) {
-                let mut inside = true;
-                let mut i = 0;
-                let mut x_pre = 0;
-                for x in min[0]..(max[0] + 1) {
-                    if let Some(pos) = self.grid_positions.get(&[x, y, z]) {
-                        if i != 0 && pos[0] - x_pre > 1 {
-                            if inside {
-                                for p in (x_pre + 1)..pos[0] {
-                                    inside_along_x.insert([p, y, z]);
-                                }
-                            }
-                            inside = !inside;
-                        }
-                        i += 1;
-                        x_pre = pos[0];
-                    }
-                }
-            }
-        }
-        let mut inside_along_y = HashSet::new();
-        for z in min[2]..(max[2] + 1) {
-            for x in min[0]..(max[0] + 1) {
-                let mut inside = true;
-                let mut i = 0;
-                let mut y_pre = 0;
-                for y in min[1]..(max[1] + 1) {
-                    if let Some(pos) = self.grid_positions.get(&[x, y, z]) {
-                        if i != 0 && pos[1] - y_pre > 1 {
-                            if inside {
-                                for p in (y_pre + 1)..pos[1] {
-                                    inside_along_y.insert([x, p, z]);
-                                }
-                            }
-                            inside = !inside;
-                        }
-                        i += 1;
-                        y_pre = pos[1];
-                    }
-                }
-            }
-        }
-        let inside_points = inside_along_x.intersection(&inside_along_y).cloned().collect::<HashSet<_>>();
-        let inside_points = inside_points.intersection(&inside_along_z);
-        for inside_point in inside_points {
-            self.grid_positions.insert(*inside_point);
+
+        for label in labels {
+            // Label of 1 means it's part of the space surrounding the outside of the mesh
+            if label.1 != 1 { self.grid_positions.insert(label.0); }
         }
     }
     pub fn vertices_indices(&self) -> (Vec<[T; 3]>, Vec<usize>) {
